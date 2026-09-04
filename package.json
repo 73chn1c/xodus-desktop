@@ -1,27 +1,29 @@
 {
-  "name": "xodus-for-heroic",
-  "version": "1.0.0",
-  "description": "Seamless Xbox Game Pass (XODUS) integration, library synchronization, launcher automation, and Proton GDK runner bridge for Heroic Games Launcher on Linux",
+  "name": "xodus-desktop",
+  "version": "2.0.0",
+  "description": "Turn downloaded Xbox Game Pass (xodus / MSIXVC / GDK) titles into native Linux .desktop entries and Steam shortcuts — no launcher fork required",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "xodus-heroic": "./bin/xodus-heroic-bridge.js"
+    "xodus-desktop": "./bin/xodus-desktop.js"
   },
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
     "test": "jest",
-    "sync": "node ./bin/xodus-heroic-bridge.js sync",
-    "doctor": "node ./bin/xodus-heroic-bridge.js doctor",
+    "sync": "node ./bin/xodus-desktop.js sync",
+    "doctor": "node ./bin/xodus-desktop.js doctor",
     "install-system": "./scripts/install.sh"
   },
   "keywords": [
     "xodus",
-    "heroic-games-launcher",
     "xbox-game-pass",
     "gdk",
+    "msixvc",
     "proton",
     "wine",
+    "steam-shortcuts",
+    "desktop-entry",
     "linux-gaming"
   ],
   "author": "73chn1c",

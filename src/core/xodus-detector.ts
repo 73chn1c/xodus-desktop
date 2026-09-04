@@ -25,7 +25,13 @@ export class XodusDetector {
       return null;
     }
 
+    // A genuine GDK / Game Pass title always ships MicrosoftGame.config. Requiring
+    // it keeps GOG/Epic/Steam folders that happen to sit in a scanned root from
+    // being picked up as false positives.
     const configPath = path.join(gameDir, 'MicrosoftGame.config');
+    if (!fs.existsSync(configPath)) {
+      return null;
+    }
     let titleId: string | undefined;
     let displayName = path.basename(gameDir);
     let explicitExe: string | undefined;
@@ -103,19 +109,22 @@ export class XodusDetector {
   }
 
   /**
-   * Scans common install directories for Game Pass / XODUS installed games.
+   * Scans the configured game roots for Game Pass / XODUS installed titles.
+   * Only directories holding a MicrosoftGame.config are returned (see
+   * inspectGameDirectory), so unrelated folders in a shared root are ignored.
    */
   public static scanStandardDirectories(customRoots: string[] = []): GdkGameMetadata[] {
     const home = os.homedir();
-    const candidateRoots = [
-      path.join(home, 'Games', 'Heroic'),
-      path.join(home, 'Games', 'Xbox'),
-      path.join(home, 'Games', 'XODUS'),
-      path.join(home, '.wine', 'drive_c', 'Program Files', 'WindowsApps'),
-      ...customRoots
-    ];
+    const candidateRoots = Array.from(
+      new Set([
+        ...customRoots,
+        path.join(home, 'Games', 'XODUS'),
+        path.join(home, 'Games', 'GamePass')
+      ])
+    );
 
     const discovered: GdkGameMetadata[] = [];
+    const seen = new Set<string>();
 
     for (const root of candidateRoots) {
       if (fs.existsSync(root)) {
@@ -125,7 +134,8 @@ export class XodusDetector {
             if (entry.isDirectory()) {
               const gamePath = path.join(root, entry.name);
               const meta = this.inspectGameDirectory(gamePath);
-              if (meta) {
+              if (meta && !seen.has(meta.gameDirectory)) {
+                seen.add(meta.gameDirectory);
                 discovered.push(meta);
               }
             }

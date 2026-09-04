@@ -1,96 +1,179 @@
-import { XodusDetector } from './core/xodus-detector';
+import * as os from 'os';
+import * as path from 'path';
+import { XodusDetector, GdkGameMetadata } from './core/xodus-detector';
 import { ProtonGdkManager } from './core/proton-gdk-manager';
 import { AudioCodecFixer } from './core/audio-codec-fixer';
-import { HeroicLibrary } from './core/heroic-library';
+import { Config } from './core/config';
+import { DesktopEntry, gameId } from './core/desktop-entry';
+import { Launcher } from './core/launcher';
+import { SteamShortcuts, shortcutAppId } from './core/steam-shortcuts';
 
-const ASCII_BANNER = `
- ██████╗  ██████╗  ██████╗ ██╗   ██╗███████╗   ██╗  ██╗███████╗██████╗  ██████╗ ██╗ ██████╗
- ██╔══██╗██╔═══██╗██╔══██╗██║   ██║██╔════╝   ██║  ██║██╔════╝██╔══██╗██╔═══██╗██║██╔════╝
- ██████╔╝██║   ██║██║  ██║██║   ██║███████╗   ███████║█████╗  ██████╔╝██║   ██║██║██║     
- ██╔═══╝ ██║   ██║██║  ██║██║   ██║╚════██║   ██╔══██║██╔══╝  ██╔══██╗██║   ██║██║██║     
- ██║     ╚██████╔╝██████╔╝╚██████╔╝███████║██╗██║  ██║███████╗██║  ██║╚██████╔╝██║╚██████╗
- ╚═╝      ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝ ╚═════╝
-             Xbox Game Pass (XODUS) Bridge for Heroic Games Launcher on Linux
-`;
+const BANNER = 'xodus-desktop — Xbox Game Pass shortcuts for the Linux desktop & Steam (no launcher fork)';
 
-export function runCli(args: string[]): void {
-  const command = args[2] || 'help';
+/** Absolute path to the installed CLI, used as the .desktop / Steam Exec target. */
+function selfBin(): string {
+  const local = path.join(os.homedir(), '.local', 'bin', 'xodus-desktop');
+  return require('fs').existsSync(local) ? local : process.argv[1];
+}
 
-  console.log(ASCII_BANNER);
+function scan(cfg = Config.load()): GdkGameMetadata[] {
+  return XodusDetector.scanStandardDirectories(cfg.gameRoots);
+}
 
-  switch (command.toLowerCase()) {
+export function runCli(argv: string[]): void {
+  const [command, ...rest] = argv.slice(2);
+  const flags = new Set(rest.filter((a) => a.startsWith('--')));
+  const positionals = rest.filter((a) => !a.startsWith('--'));
+
+  switch ((command || 'help').toLowerCase()) {
     case 'sync': {
-      console.log('🔍 Scanning installed Xbox Game Pass (MSIXVC / GDK) titles...');
-      const games = XodusDetector.scanStandardDirectories();
+      const cfg = Config.load();
+      const games = scan(cfg);
+      console.log(BANNER + '\n');
       if (games.length === 0) {
-        console.log('⚠️  No installed games found in standard locations (~/Games/Heroic, ~/Games/Xbox).');
+        console.log('No decrypted titles found. Roots scanned:');
+        cfg.gameRoots.forEach((r) => console.log('  - ' + r));
+        console.log(`\nDownload one with:  xodus-cli streaming <storeId> ${cfg.gameRoots[0]}/<Name>`);
         return;
       }
-
-      console.log(`✅ Discovered ${games.length} title(s):`);
-      for (const game of games) {
-        console.log(`   📦 ${game.displayName} [TitleId: ${game.titleId || 'N/A'}]`);
-        console.log(`      📁 Directory: ${game.gameDirectory}`);
-        console.log(`      🚀 Executable: ${game.executableName}`);
-
-        const savedPath = HeroicLibrary.syncGameToHeroic(game);
-        console.log(`      ⚙️  Configured in Heroic: ${savedPath}\n`);
+      const doSteam = flags.has('--steam');
+      console.log(`Found ${games.length} title(s):\n`);
+      for (const g of games) {
+        const res = DesktopEntry.sync(g, selfBin());
+        console.log(`  ${res.created ? '+' : '~'} ${g.displayName}`);
+        console.log(`      ${res.desktopFile}`);
+        if (doSteam) {
+          const launch = `${selfBin()} play ${res.record.id}`;
+          const updated = SteamShortcuts.upsert({
+            AppName: g.displayName,
+            Exe: `"${selfBin()}"`,
+            StartDir: `"${path.dirname(selfBin())}"`,
+            LaunchOptions: `play ${res.record.id}`,
+            tags: ['Xbox Game Pass'],
+            appid: shortcutAppId(`"${selfBin()}"`, g.displayName)
+          });
+          console.log(`      Steam: ${updated.length ? updated.length + ' user(s)' : 'no Steam install found'} — ${launch}`);
+        }
       }
-      console.log('🎉 Synchronization completed successfully! Games are ready to launch in Heroic.');
+      DesktopEntry.refreshMenus();
+      console.log('\nDone. Titles now appear in your app menu / Cartridges' + (doSteam ? ' / Steam (restart Steam)' : '') + '.');
+      break;
+    }
+
+    case 'play': {
+      const id = positionals[0];
+      if (!id) {
+        console.error('usage: xodus-desktop play <id>');
+        process.exit(2);
+      }
+      const cfg = Config.load();
+      let rec = DesktopEntry.getRecord(id);
+      if (!rec) {
+        // fall back to a fresh scan (id may match a title that was never synced)
+        const match = scan(cfg).find((g) => gameId(g) === id);
+        if (match) {
+          rec = DesktopEntry.sync(match, selfBin()).record;
+        }
+      }
+      if (!rec) {
+        console.error(`Unknown title id "${id}". Run: xodus-desktop sync`);
+        process.exit(1);
+      }
+      const game: GdkGameMetadata = {
+        displayName: rec.displayName,
+        titleId: rec.titleId,
+        gameDirectory: rec.gameDirectory,
+        executableName: rec.executableName,
+        executableFullPath: rec.executableFullPath
+      };
+      const plan = Launcher.plan(game, cfg);
+      if (flags.has('--dry-run')) {
+        console.log(Launcher.describe(plan));
+        return;
+      }
+      process.exit(Launcher.run(plan));
+      break;
+    }
+
+    case 'list': {
+      const recs = DesktopEntry.allRecords();
+      if (recs.length === 0) {
+        console.log('No synced titles. Run: xodus-desktop sync');
+        return;
+      }
+      for (const r of recs) {
+        console.log(`${r.id.padEnd(28)} ${r.displayName}`);
+      }
+      break;
+    }
+
+    case 'remove': {
+      const id = positionals[0];
+      if (!id) {
+        console.error('usage: xodus-desktop remove <id> [--steam]');
+        process.exit(2);
+      }
+      const rec = DesktopEntry.getRecord(id);
+      const ok = DesktopEntry.remove(id);
+      if (flags.has('--steam') && rec) SteamShortcuts.removeByName(rec.displayName);
+      console.log(ok ? `Removed "${id}".` : `No such id "${id}".`);
+      DesktopEntry.refreshMenus();
       break;
     }
 
     case 'doctor': {
-      console.log('🩺 Running full diagnostics for XODUS + Heroic environment...\n');
-      const status = ProtonGdkManager.getRunnerStatus();
-
-      console.log('1. Proton GDK Runtime:');
-      console.log(`   - Installed Runner: ${status.isInstalled ? '✅ YES' : '❌ NO'}`);
-      if (status.runnerPath) console.log(`     Location: ${status.runnerPath}`);
-      console.log(`   - xgameruntime.dll: ${status.xgameruntimePath ? '✅ YES' : '❌ NO'}`);
-      if (status.xgameruntimeSizeBytes) console.log(`     Size: ${(status.xgameruntimeSizeBytes / 1024 / 1024).toFixed(2)} MB`);
-
-      console.log('\n2. Audio Codecs & Subsystems:');
-      console.log(`   - Native XAudio2 / X3DAudio DLLs: ${status.hasXAudio2 ? '✅ YES' : '❌ NO'}`);
-      console.log(`   - GStreamer Plugins (ugly/bad/libav): ${status.hasGStreamerPlugins ? '✅ YES' : '❌ NO'}`);
-
-      console.log('\n3. Installed Game Detection:');
-      const games = XodusDetector.scanStandardDirectories();
-      console.log(`   - Discovered titles: ${games.length}`);
-      for (const g of games) {
-        console.log(`     • ${g.displayName} -> ${g.executableName}`);
-      }
-
-      console.log('\n✨ Diagnostics completed.');
+      console.log(BANNER + '\n');
+      const cfg = Config.load();
+      const s = ProtonGdkManager.getRunnerStatus();
+      const fs = require('fs') as typeof import('fs');
+      console.log('Config:            ' + Config.path());
+      console.log('  xodus-cli:       ' + (fs.existsSync(cfg.xodusCliPath) ? '✅ ' : '❌ ') + cfg.xodusCliPath);
+      console.log('  wine (GDK):      ' + (fs.existsSync(cfg.wineBinPath) ? '✅ ' : '❌ ') + cfg.wineBinPath);
+      console.log('  WINEPREFIX:      ' + cfg.winePrefix);
+      console.log('\nGDK runtime:');
+      console.log('  xgameruntime.dll ' + (s.xgameruntimePath ? `✅ ${(s.xgameruntimeSizeBytes! / 1048576).toFixed(1)} MB` : '❌ not found'));
+      console.log('  XAudio2 DLLs     ' + (s.hasXAudio2 ? '✅' : '❌'));
+      console.log('  GStreamer libav  ' + (s.hasGStreamerPlugins ? '✅' : '❌'));
+      const games = scan(cfg);
+      console.log(`\nTitles on disk:    ${games.length}`);
+      games.forEach((g) => console.log(`  • ${g.displayName} → ${g.executableName}`));
       break;
     }
 
     case 'fix-audio': {
-      const targetDir = args[3];
-      if (!targetDir) {
-        console.log('❌ Error: Please specify the game directory, e.g.: xodus-heroic fix-audio ~/Games/Heroic/Fallout4');
-        return;
+      const dir = positionals[0];
+      if (!dir) {
+        console.error('usage: xodus-desktop fix-audio <game-dir>');
+        process.exit(2);
       }
-      console.log(`🔧 Repairing audio configuration for: ${targetDir}...`);
-      const result = AudioCodecFixer.fixGameAudio(targetDir);
-      console.log(`   - Localized Voice Archive (.ba2/.fuz): ${result.voiceArchiveLinked ? '✅ Linked' : 'ℹ️  Already Present / Not Applicable'}`);
-      console.log(`   - Native XAudio2 DLLs: ${result.xactDllsDeployed ? '✅ Deployed' : 'ℹ️  Already Present'}`);
-      console.log(`   - Dialogue Subtitles: ${result.subtitlesEnabled ? '✅ Enabled' : 'ℹ️  Ready'}`);
-      if (result.warnings.length > 0) {
-        console.log('⚠️  Warnings:');
-        result.warnings.forEach((w) => console.log(`   - ${w}`));
-      }
-      console.log('🎉 Done!');
+      const r = AudioCodecFixer.fixGameAudio(dir);
+      console.log(`voice archive: ${r.voiceArchiveLinked ? 'linked' : 'n/a'}`);
+      console.log(`XAudio2 DLLs:  ${r.xactDllsDeployed ? 'deployed' : 'present'}`);
+      console.log(`subtitles:     ${r.subtitlesEnabled ? 'enabled' : 'ready'}`);
+      r.warnings.forEach((w) => console.log('  ! ' + w));
+      break;
+    }
+
+    case 'config': {
+      const p = Config.writeTemplate();
+      console.log('Config file: ' + p);
+      console.log(JSON.stringify(Config.load(), null, 2));
       break;
     }
 
     case 'help':
     default: {
-      console.log('Available Commands:');
-      console.log('  xodus-heroic sync            - Scans Game Pass titles and configures them in Heroic');
-      console.log('  xodus-heroic doctor          - Runs a full diagnostic audit of Proton GDK, codecs, and libraries');
-      console.log('  xodus-heroic fix-audio <dir> - Repairs audio, dialogues, and subtitles for a specific game directory');
-      console.log('  xodus-heroic help            - Displays this help message');
+      console.log(BANNER);
+      console.log(`
+  xodus-desktop sync [--steam]   Generate .desktop entries (and Steam shortcuts) for
+                                 every downloaded Game Pass title
+  xodus-desktop play <id>        Launch a title (this is what the shortcuts call)
+  xodus-desktop list             List synced titles and their ids
+  xodus-desktop remove <id> [--steam]
+  xodus-desktop doctor           Check xodus-cli / GDK wine / codecs / titles
+  xodus-desktop fix-audio <dir>  Repair dialogue audio + subtitles for one title
+  xodus-desktop config           Write / show ~/.config/xodus-desktop/config.json
+`);
       break;
     }
   }

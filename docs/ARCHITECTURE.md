@@ -1,87 +1,38 @@
-# Architecture of XODUS for Heroic
+# Architecture
 
-<p align="center">
-  <a href="ARCHITECTURE.md"><b>English</b></a> •
-  <a href="ARCHITECTURE.pl.md"><b>Polski</b></a>
-</p>
+`xodus-desktop` is a thin, launcher-independent shortcut generator. It deliberately
+does **not** manage downloads, auth, wine installs or prefixes — `xodus-cli` owns all
+of that. We only turn "a decrypted title on disk" into "a thing you can click".
 
-**XODUS for Heroic** is a standalone bridge and library manager integrating the **Xbox Game Pass for PC (MSIXVC / GDK)** ecosystem with the **Heroic Games Launcher** on Linux.
+## Modules (`src/core/`)
 
----
+| Module | Responsibility |
+|---|---|
+| `config.ts` | Load/write `config.json`; resolve all paths through `XODUS_DESKTOP_HOME` → XDG → `$HOME` |
+| `xodus-detector.ts` | Scan `gameRoots` for directories containing `MicrosoftGame.config`; extract TitleId / DisplayName / icon; delegate exe choice to the resolver |
+| `executable-resolver.ts` | Pick the real game binary over `*Launcher.exe` / `*CrashHandler.exe` stubs |
+| `desktop-entry.ts` | Write `~/.local/share/applications/xodus-<id>.desktop`; keep a `games.json` record so `play` and `remove` work by id |
+| `steam-shortcuts.ts` | Dependency-free binary `shortcuts.vdf` reader/writer; upsert/remove by AppName across every Steam user; back up as `shortcuts.vdf.xodus-bak` |
+| `launcher.ts` | Build and run `[gamemoderun] <xodus-cli> run <dir> <wine> --exe <exe>` with the GDK env, `WINEPREFIX` and PRIME offload |
+| `proton-gdk-manager.ts` | Locate `xgameruntime.dll` / XAudio2 / GStreamer; provide the canonical GDK env block |
+| `audio-codec-fixer.ts` | Per-title dialogue-audio / subtitle repairs |
 
-## 1. Data Flow Diagram
+## Control flow
 
-```text
-+-------------------------------------------------------------+
-|                Xbox Live Cloud / MS Store CDN               |
-+-------------------------------------------------------------+
-                              |
-                              v  (MSIXVC Encrypted Packages)
-+-------------------------------------------------------------+
-|                   XODUS Engine / libmsixvc                  |
-|    - Block Decryption (AES-XTS)                             |
-|    - Package extraction & MicrosoftGame.config parsing      |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-|                     xodus-for-heroic                        |
-|    - Manifest Scanner (XodusDetector)                       |
-|    - Smart Binary Heuristics (ExecutableResolver)           |
-|    - Proton GDK Runner Manager (ProtonGdkManager)           |
-|    - Audio/DLL Environment Injector (AudioCodecFixer)       |
-|    - Heroic GamesConfig Generator (HeroicLibrary)           |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-|                  Heroic Games Launcher                      |
-|    - Library UI, Game Launching, Playtime Tracking          |
-|    - Wine / Proton Prefix Isolation                         |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-|               Proton-XODUS-GDK / Wine Runtime               |
-|    - xgameruntime.dll:                                      |
-|        • XGameSave (physical disk engine)                   |
-|        • XUser (SISU auth / token signature provider)       |
-|        • XGameUi / XStore / XAccessibility / XNetworking    |
-|    - GStreamer + XAudio2: full audio support (.fuz/.ba2)    |
-|    - DXVK / VKD3D-Proton (Direct3D 11/12 -> Vulkan)         |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-|                         GDK GAME                            |
-|          (Fallout 4, Lies of P, Forza, Starfield...)        |
-+-------------------------------------------------------------+
+```
+sync:   detector.scan(gameRoots)
+          → for each title: desktop-entry.sync()  [+ steam-shortcuts.upsert()]
+          → update-desktop-database
+
+play <id>:  games.json[id]  (or a fresh scan fallback)
+          → launcher.plan()  → launcher.run()   (exec, stdio inherited, exit code propagated)
 ```
 
----
+## Why not a launcher plugin
 
-## 2. Core Modules
-
-### `XodusDetector` (`src/core/xodus-detector.ts`)
-- Parses `MicrosoftGame.config` manifests.
-- Extracts TitleId, DisplayName, version, icon assets, and declared executable targets.
-- Discovers Game Pass installations across standard Linux paths (`~/Games/Heroic`, `~/Games/Xbox`, `~/.wine/drive_c/Program Files/WindowsApps`).
-
-### `ExecutableResolver` (`src/core/executable-resolver.ts`)
-- Evaluates `.exe` files in game root directories.
-- Deprioritizes helper tools (`*Launcher.exe`, `*Setup.exe`, crash reporters, anti-cheat stubs) and selects the native game binary.
-
-### `ProtonGdkManager` (`src/core/proton-gdk-manager.ts`)
-- Verifies installation of the `Proton-XODUS-GDK` runner.
-- Audits `xgameruntime.dll` physical save implementation and asynchronous pipeline completeness.
-- Constructs fine-tuned execution environments (`WINEDLLOVERRIDES`, `PULSE_LATENCY_MSEC`, `DXVK_ENABLE_NVAPI`).
-
-### `AudioCodecFixer` (`src/core/audio-codec-fixer.ts`)
-- Verifies system GStreamer plugins (`ugly`, `bad`, `libav`) on Debian/Ubuntu/Arch.
-- Deploys Microsoft DirectX XACT libraries (`xaudio2_7.dll`, `x3daudio1_7.dll`).
-- Creates aliases for localized audio archives (`Fallout4 - Voices_pl.ba2` -> `Fallout4 - Voices.ba2`).
-- Configures subtitle options in user INI documents.
-
-### `HeroicLibrary` (`src/core/heroic-library.ts`)
-- Writes Heroic JSON configurations to `~/.config/heroic/GamesConfig/<game-id>.json`.
-- Integrates runner parameters, DXVK/VKD3D flags, and audio overrides directly into Heroic.
+Neither Heroic nor Lutris load out-of-tree store plugins in 2026 — each store is a
+compiled-in class, so any integration is a permanent fork with manual rebases on every
+release. Generating freedesktop `.desktop` files + Steam shortcuts instead means the
+titles show up in GNOME/KDE menus, Cartridges, and Steam/Big Picture with zero launcher
+code to maintain. A real GUI, if wanted later, belongs upstream in the xodus repo as
+`xodus-ui`, not in a downstream launcher fork.
